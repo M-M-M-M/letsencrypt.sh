@@ -1,31 +1,56 @@
-# default values are commented
+#!/bin/bash
 
-#CA="https://acme-v01.api.letsencrypt.org"
-#WELLKNOWN=".acme-challenges"
-#KEYSIZE=4096
-#BASEDIR=./
-#OPENSSL_CNF=.... # system default (see openssl version -d)
+########################################################
+# This is the config file for letsencrypt.sh           #
+#                                                      #
+# This file is looked for in the following locations:  #
+# $SCRIPTDIR/config.sh (next to this script)           #
+# ${HOME}/.letsencrypt.sh/config.sh (in user home)     #
+# /usr/local/etc/letsencrypt.sh/config.sh              #
+# /etc/letsencrypt.sh/config.sh                        #
+# ${PWD}/config.sh (in current working-directory)      #
+#                                                      #
+# Default values of this config are in comments        #
+########################################################
+
+# Path to certificate authority (default: https://acme-v01.api.letsencrypt.org/directory)
+#CA="https://acme-v01.api.letsencrypt.org/directory"
+
+# Path to license agreement (default: https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf)
+#LICENSE="https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf"
+
+# Output directory for challenge-tokens to be served by webserver or deployed in HOOK (default: $SCRIPTDIR/.acme-challenges)
+#WELLKNOWN="${SCRIPTDIR}/.acme-challenges"
+
+# Default keysize for private keys (default: 4096)
+#KEYSIZE="4096"
+
+# Base directory for account key, generated certificates and list of domains (default: $SCRIPTDIR -- uses config directory if undefined)
+#BASEDIR=$SCRIPTDIR
+
+# Path to openssl config file (default: <unset> - tries to figure out system default)
+#OPENSSL_CNF=
+
+# Name of root certificate (default: lets-encrypt-x1-cross-signed.pem)
 #ROOTCERT="lets-encrypt-x1-cross-signed.pem"
 
-# program called before responding to the challenge, arguments: path/to/token
-# token; can be used to e.g. upload the challenge if this script doesn't run
-# on the webserver
-#HOOK_CHALLENGE=
+# Program or function called in certain situations
+#
+# After generating the challenge-response, or after failed challenge (in this case altname is empty)
+# Given arguments: clean_challenge|deploy_challenge altname token-filename token-content
+#
+# After successfully signing certificate
+# Given arguments: deploy_cert domain path/to/privkey.pem path/to/cert.pem path/to/fullchain.pem
+#
+# BASEDIR and WELLKNOWN variables are exported and can be used in an external program
+# default: <unset>
+#HOOK=
 
-# try to renew certs that are within RENEW_DAYS days of their expiration date
+# Minimum days before expiration to automatically renew certificate (default: 14)
 #RENEW_DAYS="14"
 
-# create new private key for each csr (yes|no)
-#PRIVATE_KEY_RENEW=no
+# Regenerate private keys instead of just signing new certificates on renewal (default: no)
+#PRIVATE_KEY_RENEW="no"
 
-# GNU sed program to use - use gsed on some plateforms
-#SED=sed
-
-# opennsl.cnf file
-#OPENSSLCNF=/etc/ssl/openssl.cnf
-#OPENSSLCNF=/System/Library/OpenSSL/openssl.cnf
-#OPENSSLCNF=/etc/pki/tls/openssl.cnf
-#OPENSSLCNF=/usr/lib/ssl/openssl.cnf
-#OPENSSLCNF=/usr/local/ssl/openssl.cnf
-
-
+# E-mail to use during the registration (default: <unset>)
+#CONTACT_EMAIL=
