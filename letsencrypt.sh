@@ -127,10 +127,10 @@ init_system() {
   fi
 
   # Get public components from private key and calculate thumbprint
-  pubExponent64="$(printf "%06x" "$(openssl rsa -in "${PRIVATE_KEY}" -noout -text | grep publicExponent | head -1 | cut -d' ' -f2)" | hex2bin | urlbase64)"
-  pubMod64="$(printf '%s' "$(openssl rsa -in "${PRIVATE_KEY}" -noout -modulus | cut -d'=' -f2)" | hex2bin | urlbase64)"
+  pubExponent64="$(openssl rsa -in "${PRIVATE_KEY}" -noout -text | grep publicExponent | grep -oE "0x[a-f0-9]+" | cut -d'x' -f2 | hex2bin | urlbase64)"
+  pubMod64="$(openssl rsa -in "${PRIVATE_KEY}" -noout -modulus | cut -d'=' -f2 | hex2bin | urlbase64)"
 
-  thumbprint="$(printf '%s' '{"e":"'"${pubExponent64}"'","kty":"RSA","n":"'"${pubMod64}"'"}' | openssl sha -sha256 -binary | urlbase64)"
+  thumbprint="$(printf '{"e":"%s","kty":"RSA","n":"%s"}' "${pubExponent64}" "${pubMod64}" | openssl sha -sha256 -binary | urlbase64)"
 
   # If we generated a new private key in the step above we have to register it with the acme-server
   if [[ "${register}" = "1" ]]; then
@@ -215,7 +215,7 @@ _request() {
     echo "  + ERROR: An error occurred while sending ${1}-request to ${2} (Status ${statuscode})" >&2
     echo >&2
     echo "Details:" >&2
-    echo "$(<"${tempcont}"))" >&2
+    cat "${tempcont}" >&2
     rm -f "${tempcont}"
 
     # Wait for hook script to clean the challenge if used
@@ -306,7 +306,12 @@ sign_domain() {
   done
   SAN="${SAN%%, }"
   echo " + Generating signing request..."
-  openssl req -new -sha256 -key "${BASEDIR}/certs/${domain}/${privkey}" -out "${BASEDIR}/certs/${domain}/cert-${timestamp}.csr" -subj "/CN=${domain}/" -reqexts SAN -config <(cat "${OPENSSL_CNF}" <(printf "[SAN]\nsubjectAltName=%s" "${SAN}"))
+  local tmp_openssl_cnf
+  tmp_openssl_cnf="$(mktemp)"
+  cat "${OPENSSL_CNF}" > "${tmp_openssl_cnf}"
+  printf "[SAN]\nsubjectAltName=%s" "${SAN}" >> "${tmp_openssl_cnf}"
+  openssl req -new -sha256 -key "${BASEDIR}/certs/${domain}/${privkey}" -out "${BASEDIR}/certs/${domain}/cert-${timestamp}.csr" -subj "/CN=${domain}/" -reqexts SAN -config "${tmp_openssl_cnf}"
+  rm -f "${tmp_openssl_cnf}"
 
   # Request and respond to challenges
   for altname in $altnames; do
@@ -378,7 +383,12 @@ sign_domain() {
   # Create fullchain.pem
   echo " + Creating fullchain.pem..."
   cat "${crt_path}" > "${BASEDIR}/certs/${domain}/fullchain-${timestamp}.pem"
-  _request get "$(openssl x509 -in "${BASEDIR}/certs/${domain}/cert-${timestamp}.pem" -noout -text | grep 'CA Issuers - URI:' | cut -d':' -f2-)" >> "${BASEDIR}/certs/${domain}/fullchain-${timestamp}.pem"
+  _request get "$(openssl x509 -in "${BASEDIR}/certs/${domain}/cert-${timestamp}.pem" -noout -text | grep 'CA Issuers - URI:' | cut -d':' -f2-)" > "${BASEDIR}/certs/${domain}/chain-${timestamp}.pem"
+  if ! grep "BEGIN CERTIFICATE" "${BASEDIR}/certs/${domain}/chain-${timestamp}.pem" > /dev/null 2>&1; then
+    openssl x509 -in "${BASEDIR}/certs/${domain}/chain-${timestamp}.pem" -inform DER -out "${BASEDIR}/certs/${domain}/chain-${timestamp}.pem" -outform PEM
+  fi
+  ln -sf "chain-${timestamp}.pem" "${BASEDIR}/certs/${domain}/chain.pem"
+  cat "${BASEDIR}/certs/${domain}/chain-${timestamp}.pem" >> "${BASEDIR}/certs/${domain}/fullchain-${timestamp}.pem"
   ln -sf "fullchain-${timestamp}.pem" "${BASEDIR}/certs/${domain}/fullchain.pem"
 
   # Update remaining symlinks
@@ -400,7 +410,7 @@ sign_domain() {
 
 
 # Usage: --cron (-c)
-# Description: Sign/renew non-existant/changed(TODO)/expiring certificates.
+# Description: Sign/renew non-existant/changed/expiring certificates.
 command_sign_domains() {
   if [[ -n "${PARAM_DOMAIN:-}" ]]; then
     # we are using a temporary domains.txt file so we don't need to duplicate any code
@@ -413,6 +423,8 @@ command_sign_domains() {
     morenames="$(printf '%s\n' "${line}" | cut -s -d' ' -f2-)"
     cert="${BASEDIR}/certs/${domain}/cert.pem"
 
+    force_renew="${PARAM_FORCE:-no}"
+
     if [[ -z "${morenames}" ]];then
       echo "Processing ${domain}"
     else
@@ -420,15 +432,33 @@ command_sign_domains() {
     fi
 
     if [[ -e "${cert}" ]]; then
-      echo " + Found existing cert..."
+      echo -n " + Checking domain name(s) of existing cert..."
+
+      certnames="$(openssl x509 -in "${cert}" -text -noout | grep DNS: | sed 's/DNS://g' | tr -d ' ' | tr ',' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+      givennames="$(echo "${domain}" "${morenames}"| tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//' | sed 's/^ //')"
+
+      if [[ "${certnames}" = "${givennames}" ]]; then
+        echo " unchanged."
+      else
+        echo " changed!"
+        echo " + Domain name(s) are not matching!"
+        echo " + Names in old certificate: ${certnames}"
+        echo " + Configured names: ${givennames}"
+        echo " + Forcing renew."
+        force_renew="yes"
+      fi
+    fi
+
+    if [[ -e "${cert}" ]]; then
+      echo " + Checking expire date of existing cert..."
 
       valid="$(openssl x509 -enddate -noout -in "${cert}" | cut -d= -f2- )"
 
       echo -n " + Valid till ${valid} "
       if openssl x509 -checkend $((RENEW_DAYS * 86400)) -noout -in "${cert}"; then
         echo -n "(Longer than ${RENEW_DAYS} days). "
-        if [[ "${PARAM_FORCE:-}" = "yes" ]]; then
-          echo "Ignoring because --force was specified!"
+        if [[ "${force_renew}" = "yes" ]]; then
+          echo "Ignoring because renew was forced!"
         else
           echo "Skipping!"
           continue
@@ -444,7 +474,7 @@ command_sign_domains() {
 
   # remove temporary domains.txt file if used
   if [[ -n "${PARAM_DOMAIN:-}" ]]; then
-    rm "${DOMAINS_TXT}"
+    rm -f "${DOMAINS_TXT}"
   fi
 }
 
@@ -452,8 +482,22 @@ command_sign_domains() {
 # Description: Revoke specified certificate
 command_revoke() {
   cert="${1}"
+  if [[ -L "${cert}" ]]; then
+    # follow symlink and use real certificate name (so we move the real file and not the symlink at the end)
+    local link_target
+    link_target="$(readlink -n "${cert}")"
+    if [[ "${link_target}" =~ ^/ ]]; then
+      cert="${link_target}"
+    else
+      cert="$(dirname "${cert}")/${link_target}"
+    fi
+  fi
+  if [[ ! -f "${cert}" ]]; then
+    echo "ERROR: Could not find certificate ${cert}"
+    exit 1
+  fi
   echo "Revoking ${cert}"
-  if [ -z "${CA_REVOKE_CERT}" ]; then
+  if [[ -z "${CA_REVOKE_CERT}" ]]; then
     echo " + ERROR: Certificate authority doesn't allow certificate revocation." >&2
     exit 1
   fi
@@ -570,7 +614,6 @@ while getopts ":hcer:d:xf:p:" option; do
       # PARAM_Usage: --domain (-d) domain.tld
       # PARAM_Description: Use specified domain name instead of domains.txt, use multiple times for certificate with SAN names
       check_parameters "${OPTARG:-}"
-      set_command sign_domains
       if [[ -z "${PARAM_DOMAIN:-}" ]]; then
         PARAM_DOMAIN="${OPTARG}"
       else
